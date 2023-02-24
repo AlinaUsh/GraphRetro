@@ -95,6 +95,7 @@ class LGIndEmbed(nn.Module):
         self.lg_loss = nn.CrossEntropyLoss(ignore_index=self.lg_vocab["<pad>"])
 
     def _compute_lg_step(self, graph_vecs, prod_vecs, prev_embed=None):
+
         if self.toggles.get('use_prev_pred', False):
             if prev_embed is None:
                 init_state = torch.zeros(graph_vecs.size(0), len(self.lg_vocab), device=self.device)
@@ -102,12 +103,32 @@ class LGIndEmbed(nn.Module):
                 prev_lg_emb = self.lg_embedding(init_state)
             else:
                 prev_lg_emb = prev_embed
-
-        if self.toggles.get('use_prev_pred', False):
-            scores_lg = self.lg_score(torch.cat([prev_lg_emb, prod_vecs, graph_vecs], dim=-1))
+        entropy = None
+        if self.training or self.mcd_samples == 0:
+            if self.toggles.get('use_prev_pred', False):
+                scores_lg = self.lg_score(torch.cat([prev_lg_emb, prod_vecs, graph_vecs], dim=-1))
+            else:
+                scores_lg = self.lg_score(torch.cat([prod_vecs, graph_vecs], dim=-1))
         else:
-            scores_lg = self.lg_score(torch.cat([prod_vecs, graph_vecs], dim=-1))
-        return scores_lg, None
+            probs_list = []
+            scores_lg_sum = torch.zeros((1, 174)).to(self.device)
+            self.enable_dropout()
+            for i in range(self.mcd_samples):
+                if self.toggles.get('use_prev_pred', False):
+                    scores_lg = self.lg_score(torch.cat([prev_lg_emb, prod_vecs, graph_vecs], dim=-1))
+                else:
+                    scores_lg = self.lg_score(torch.cat([prod_vecs, graph_vecs], dim=-1))
+                scores_lg_sum = scores_lg_sum + scores_lg
+                probs_list.append(torch.softmax(scores_lg, dim=-1).cpu().numpy())
+            self.disable_dropout()
+            probs_list = np.array(probs_list)
+            mean = np.mean(probs_list, axis=0)
+            scores_lg = scores_lg_sum / self.mcd_samples
+            variance = np.var(probs_list, axis=0)
+            epsilon = sys.float_info.epsilon
+            entropy = -np.sum(mean * np.log(mean + epsilon), axis=-1)
+            # uncertainty = (mean, entropy)
+        return scores_lg, entropy
 
     def _compute_lg_logits(self, graph_vecs_pad, prod_vecs, lg_labels=None):
         scores = torch.tensor([], device=self.device)
@@ -258,8 +279,8 @@ class LGIndEmbed(nn.Module):
                 # prod_vecs, frag_vecs_pad = self(prod_inputs, frag_inputs)
                 # lg_logits = self._compute_lg_logits(frag_vecs_pad, prod_vecs, lg_labels=None)
 
-
                 if mcd != 0:
+                    # исправить: сейчас mc делается mc^2 раз. надо убрать цикл и посмотреть, что именно надо возвращать. или убрать вообще
                     self.enable_dropout()
                     probs_list = []
                     for i in range(mcd):
@@ -271,7 +292,8 @@ class LGIndEmbed(nn.Module):
                     mean = np.mean(probs_list, axis=0)
                     # print(f'mean shape:       {mean.shape}')
                     variance = np.var(probs_list, axis=0)
-                    epsilon = sys.float_info.min
+                    # epsilon = sys.float_info.min
+                    epsilon = sys.float_info.epsilon
                     entropy = -np.sum(mean * np.log(mean + epsilon), axis=-1)
                     mutual_info = entropy - np.mean(np.sum(-probs_list * np.log(probs_list + epsilon), axis=-1), axis=0)
                     self.disable_dropout()

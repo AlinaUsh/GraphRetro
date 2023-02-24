@@ -44,6 +44,7 @@ def main():
 
     parser.add_argument(
         "--mcd_samples",
+        type=int,
         default=0,
         help="Number of samples for MC dropout. 0 -- without uncertainty quantification."
     )
@@ -88,9 +89,6 @@ def main():
                 tensor_file = os.path.join(args.data_dir, "train/h_labels/with_rxn/lg_inputs.pt")
             config['tensor_file'] = tensor_file
 
-    print(config)
-    print(model_name)
-    print(model_class)
     config['config']['mcd_samples'] = args.mcd_samples
     lg_model = model_class(**config, device=DEVICE)
     lg_model.load_state_dict(lg_loaded['state'])
@@ -100,6 +98,11 @@ def main():
     n_matched = np.zeros(args.beam_width)
     beam_model = LGSearch(model=lg_model, beam_width=args.beam_width, max_edits=1)
     pbar = tqdm.tqdm(list(range(len(test_df))))
+
+    results_df = pd.read_csv(args.test_file)
+    # entropies and predicted leaving groups for top-5
+    entropies = [[], [], [], [], []]
+    leaving_groups_pred = [[], [], [], [], []]
 
     for idx in pbar:
         rxn_smi = test_df.loc[idx, 'reactants>reagents>production']
@@ -115,6 +118,7 @@ def main():
 
         reactants = Chem.MolFromSmiles(r)
         products = Chem.MolFromSmiles(p)
+
         fragments = apply_edits_to_mol(Chem.Mol(products), info.core_edits)
 
         frag_mols = MultiElement(Chem.Mol(fragments)).mols
@@ -129,6 +133,10 @@ def main():
         else:
             top_k_nodes = beam_model.run_search(p, edits=info.core_edits, max_steps=6)
 
+        for i, node in enumerate(top_k_nodes):
+            entropies[i].append('\n'.join([str(e) for e in node.entropies]))
+            leaving_groups_pred[i].append('\n'.join(node.lg_groups))
+
         beam_matched = False
         for beam_idx, node in enumerate(top_k_nodes):
             pred_labels = node.lg_groups
@@ -142,6 +150,13 @@ def main():
             msg += ', t%d: %.4f' % (beam_idx, match_perc)
 
         pbar.set_description(msg)
+
+    for i in range(5):
+        results_df[f'entropy top-{i + 1}'] = entropies[i]
+    for i in range(5):
+        results_df[f'lg top-{i + 1} pred'] = leaving_groups_pred[i]
+
+    results_df.to_csv('eval_entropy.csv')
 
 
 if __name__ == "__main__":

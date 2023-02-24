@@ -26,6 +26,8 @@ class BeamNode:
         self.num_fragments = None
         self.node_complete = False
 
+        self. entropies = []
+
     def _build_tensors(self):
         self.prod_vecs = None
         self.frag_vecs = None
@@ -35,7 +37,7 @@ class BeamNode:
         self.edit = edit
         self.prob += edit_prob
 
-    def add_lg(self, lg_group, lg_prob):
+    def add_lg(self, lg_group, lg_prob, entropy=None):
         if self.node_complete:
             print("All leaving groups added. Skipping for this node.")
             sys.stdout.flush()
@@ -44,6 +46,7 @@ class BeamNode:
             self.lg_groups.append(lg_group)
             self.lg_idx += 1
             self.prob += lg_prob
+            self.entropies.append(entropy)
             if len(self.lg_groups) == self.num_fragments:
                 self.node_complete = True
 
@@ -65,6 +68,8 @@ def copy_node(node):
 
     if node.prev_embed is not None:
         new_node.prev_embed = node.prev_embed.clone()
+
+    new_node.entropies = node.entropies.copy()
 
     return new_node
 
@@ -262,9 +267,11 @@ class BeamSearch:
     def add_lg_to_node(self, node):
         new_node = copy_node(node)
         if not new_node.node_complete:
-            scores_lg, _ = self.model._compute_lg_step(graph_vecs=new_node.frag_vecs[:, new_node.lg_idx],
-                                                       prod_vecs=new_node.prod_vecs.clone(),
-                                                       prev_embed=new_node.prev_embed)
+            scores_lg, entropy = self.model._compute_lg_step(
+                graph_vecs=new_node.frag_vecs[:, new_node.lg_idx],
+                prod_vecs=new_node.prod_vecs.clone(),
+                prev_embed=new_node.prev_embed
+            )
 
             scores_lg = F.log_softmax(scores_lg, dim=-1)
             if not hasattr(self.model, 'lg_vocab'):
@@ -276,17 +283,15 @@ class BeamSearch:
             new_list = [copy_node(new_node) for _ in range(self.beam_width)]
 
             if hasattr(self.model, 'encoder'):
-                # print('hasattr encoder')
                 for i_tensor, node in zip(*(topk_idxs, new_list)):
                     i = i_tensor.item()
                     if isinstance(self.model.lg_embedding, nn.Linear):
                         node.prev_embed = self.model.lg_embedding(self.model.E_lg.index_select(index=i_tensor, dim=0))
                     else:
                         node.prev_embed = self.model.lg_embedding.index_select(index=i_tensor, dim=0)
-                    node.add_lg(self.model.lg_vocab.get_elem(i), scores_lg[:, i].item())
+                    node.add_lg(self.model.lg_vocab.get_elem(i), scores_lg[:, i].item(), entropy)
 
             else:
-                # print('no hasattr encoder')
                 for i_tensor, node in zip(*(topk_idxs, new_list)):
                     i = i_tensor.item()
                     if isinstance(self.model.lg_net.lg_embedding, nn.Linear):
@@ -294,9 +299,8 @@ class BeamSearch:
                             self.model.lg_net.E_lg.index_select(index=i_tensor, dim=0))
                     else:
                         node.prev_embed = self.model.lg_net.lg_embedding.index_select(index=i_tensor, dim=0)
-                    node.add_lg(self.model.lg_net.lg_vocab.get_elem(i), scores_lg[:, i].item())
+                    node.add_lg(self.model.lg_net.lg_vocab.get_elem(i), scores_lg[:, i].item(), entropy)
             assert all([node.frag_vecs is not None for node in new_list])
-            # print(f'add_lg_to_node return {new_list}')
             return new_list
 
         else:
@@ -482,6 +486,7 @@ class LGSearch(BeamSearch):
                 prod_vecs, _ = self.model.lg_net.encoder(prod_tensors, prod_scopes)
 
             node_list = [BeamNode(mol=prod_mol)]
+
             for node in node_list:
                 node.prod_vecs = prod_vecs.clone()
                 node.add_edit(edits, 0.0)
@@ -495,6 +500,4 @@ class LGSearch(BeamSearch):
                 steps += 1
 
             new_node_list = self.keep_topk_nodes(new_node_list)
-            # print([node.lg_groups for node in new_node_list])
-
         return new_node_list
