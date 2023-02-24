@@ -201,6 +201,7 @@ def get_args():
 
     parser.add_argument(
         "--mcd_samples",
+        type=int,
         default=0,
         help="Number of samples for MC dropout. 0 -- without uncertainty quantification."
     )

@@ -51,7 +51,6 @@ class LGIndEmbed(nn.Module):
         self._build_layers()
         self.mcd_samples = config['mcd_samples']
 
-
     def _build_layers(self) -> None:
         """Builds the layers in the classifier."""
         config = self.config
@@ -133,20 +132,21 @@ class LGIndEmbed(nn.Module):
     def _compute_lg_logits(self, graph_vecs_pad, prod_vecs, lg_labels=None):
         scores = torch.tensor([], device=self.device)
         prev_lg_emb = None
+        entropy = None
 
         if lg_labels is None:
             for idx in range(graph_vecs_pad.size(1)):
-                scores_lg, _ = self._compute_lg_step(graph_vecs_pad[:, idx], prod_vecs, prev_embed=prev_lg_emb)
+                scores_lg, entropy = self._compute_lg_step(graph_vecs_pad[:, idx], prod_vecs, prev_embed=prev_lg_emb)
                 prev_lg_emb = self.lg_embedding(self.E_lg.index_select(index=torch.argmax(scores_lg, dim=-1), dim=0))
                 scores = torch.cat([scores, scores_lg.unsqueeze(1)], dim=1)
 
         else:
             for idx in range(graph_vecs_pad.size(1)):
-                scores_lg, _ = self._compute_lg_step(graph_vecs_pad[:, idx], prod_vecs, prev_embed=prev_lg_emb)
+                scores_lg, entropy = self._compute_lg_step(graph_vecs_pad[:, idx], prod_vecs, prev_embed=prev_lg_emb)
                 prev_lg_emb = self.lg_embedding(self.E_lg.index_select(index=lg_labels[:, idx], dim=0))
                 scores = torch.cat([scores, scores_lg.unsqueeze(1)], dim=1)
 
-        return scores
+        return scores, entropy
 
     def forward(self, prod_inputs, frag_inputs):
         prod_tensors, prod_scopes = prod_inputs
@@ -187,7 +187,7 @@ class LGIndEmbed(nn.Module):
     def train_step(self, prod_inputs, frag_inputs, lg_labels, lengths, **kwargs):
         prod_vecs, frag_vecs_pad = self(prod_inputs, frag_inputs)
         lg_labels = self.to_device(lg_labels)
-        lg_logits = self._compute_lg_logits(frag_vecs_pad, prod_vecs=prod_vecs, lg_labels=lg_labels)
+        lg_logits, _ = self._compute_lg_logits(frag_vecs_pad, prod_vecs=prod_vecs, lg_labels=lg_labels)
 
         lg_loss, lg_acc = self._compute_lg_stats(lg_logits, lg_labels, lengths)
         metrics = {'loss': lg_loss.item(), "accuracy": lg_acc.item()}
@@ -221,7 +221,6 @@ class LGIndEmbed(nn.Module):
 
         metrics = {'loss': None, 'accuracy': acc_lg}
         return None, metrics
-
 
     def enable_dropout(self):
         """ Function to enable the dropout layers during test-time """
@@ -274,46 +273,19 @@ class LGIndEmbed(nn.Module):
 
                 frag_graph = MultiElement(mol=Chem.Mol(fragments), rxn_class=rxn_class)
                 frag_inputs = pack_graph_feats([frag_graph], directed=directed,
-                                                return_graphs=False, use_rxn_class=use_rxn_class)
+                                               return_graphs=False, use_rxn_class=use_rxn_class)
 
-                # prod_vecs, frag_vecs_pad = self(prod_inputs, frag_inputs)
-                # lg_logits = self._compute_lg_logits(frag_vecs_pad, prod_vecs, lg_labels=None)
-
-                if mcd != 0:
-                    # исправить: сейчас mc делается mc^2 раз. надо убрать цикл и посмотреть, что именно надо возвращать. или убрать вообще
-                    self.enable_dropout()
-                    probs_list = []
-                    for i in range(mcd):
-                        prod_vecs, frag_vecs_pad = self(prod_inputs, frag_inputs)
-                        lg_logits = self._compute_lg_logits(frag_vecs_pad, prod_vecs, lg_labels=None)
-                        probs_list.append(torch.softmax(lg_logits, dim=-1).cpu().numpy())
-                    probs_list = np.array(probs_list)
-                    # print(f'probs_list shape: {probs_list.shape}')
-                    mean = np.mean(probs_list, axis=0)
-                    # print(f'mean shape:       {mean.shape}')
-                    variance = np.var(probs_list, axis=0)
-                    # epsilon = sys.float_info.min
-                    epsilon = sys.float_info.epsilon
-                    entropy = -np.sum(mean * np.log(mean + epsilon), axis=-1)
-                    mutual_info = entropy - np.mean(np.sum(-probs_list * np.log(probs_list + epsilon), axis=-1), axis=0)
-                    self.disable_dropout()
-                    lg_logits = mean
-                    lg_logits = torch.FloatTensor(lg_logits)
-
-                else:
+                if mcd == 0 or self.training:
                     prod_vecs, frag_vecs_pad = self(prod_inputs, frag_inputs)
-                    lg_logits = self._compute_lg_logits(frag_vecs_pad, prod_vecs, lg_labels=None)
-
-                    # print(f'lg_ind_embed logits_shape: {lg_logits.shape}')
-                # lg_logits_shape:  [1, x, 174]
-                # pred_labels_len:  x
-                # where x in {1, 2, 3}
+                    lg_logits, _ = self._compute_lg_logits(frag_vecs_pad, prod_vecs, lg_labels=None)
+                else:
+                    self.enable_dropout()
+                    prod_vecs, frag_vecs_pad = self(prod_inputs, frag_inputs)
+                    lg_logits, entropy = self._compute_lg_logits(frag_vecs_pad, prod_vecs, lg_labels=None)
+                    self.disable_dropout()
 
                 _, preds = torch.max(lg_logits, dim=-1)
                 preds = preds.squeeze(0)
                 pred_labels = [self.lg_vocab.get_elem(pred.item()) for pred in preds]
-
-                # print(f'lg_ind_embed pred_labels_shape: {len(pred_labels)}')
-                # print()
 
                 return pred_labels

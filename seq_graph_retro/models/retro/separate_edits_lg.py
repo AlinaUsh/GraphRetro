@@ -67,9 +67,10 @@ class EditLGSeparate:
         return self.edit_net._compute_edit_logits(graph_tensors, scopes, ha=ha, bg_inputs=bg_inputs)
 
     def _compute_lg_logits(self, graph_vecs_pad, prod_vecs, lg_labels=None):
-        return self.lg_net._compute_lg_logits(graph_vecs_pad=graph_vecs_pad,
-                                              prod_vecs=prod_vecs,
-                                              lg_labels=lg_labels)
+        r, _ = self.lg_net._compute_lg_logits(graph_vecs_pad=graph_vecs_pad,
+                                       prod_vecs=prod_vecs,
+                                       lg_labels=lg_labels)
+        return r
 
     def _compute_lg_step(self, graph_vecs, prod_vecs, prev_embed=None):
         return self.lg_net._compute_lg_step(graph_vecs=graph_vecs,
