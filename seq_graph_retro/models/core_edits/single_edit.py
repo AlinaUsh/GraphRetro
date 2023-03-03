@@ -4,8 +4,11 @@ import torch.nn.functional as F
 from rdkit import Chem
 from typing import List, Dict, Tuple, Union
 
+import sys
+import numpy as np
+
 from seq_graph_retro.layers import (AtomAttention, GraphFeatEncoder, WLNEncoder,
-                            LogitEncoder, GTransEncoder)
+                                    LogitEncoder, GTransEncoder)
 from seq_graph_retro.utils.torch import index_select_ND, build_mlp
 from seq_graph_retro.utils.metrics import get_accuracy_edits
 from seq_graph_retro.molgraph.mol_features import BOND_FLOATS
@@ -45,6 +48,8 @@ class SingleEdit(nn.Module):
 
         self._build_layers()
         self._build_losses()
+
+        self.mcd_samples = config['mcd_samples']
 
     def _build_layers(self) -> None:
         """Builds the different layers associated with the model."""
@@ -92,9 +97,9 @@ class SingleEdit(nn.Module):
             unimol_score_in_dim += add_dim
 
         self.bond_score = build_mlp(in_dim=bond_score_in_dim,
-                               h_dim=config['mlp_size'],
-                               out_dim=config['bs_outdim'],
-                               dropout_p=config['dropout_mlp'])
+                                    h_dim=config['mlp_size'],
+                                    out_dim=config['bs_outdim'],
+                                    dropout_p=config['dropout_mlp'])
         self.unimol_score = build_mlp(in_dim=unimol_score_in_dim,
                                       out_dim=1, h_dim=config['mlp_size'],
                                       dropout_p=config['dropout_mlp'])
@@ -108,12 +113,12 @@ class SingleEdit(nn.Module):
                                                dropout_p=config['dropout_mpn'],
                                                outdim=config['bs_outdim'])
 
-
     def _build_losses(self) -> None:
         """Builds losses associated with the model."""
         if self.config['edit_loss'] == 'sigmoid':
             config = self.config
-            self.edit_loss = nn.BCEWithLogitsLoss(reduction='none', pos_weight=torch.FloatTensor([config['pos_weight']]))
+            self.edit_loss = nn.BCEWithLogitsLoss(reduction='none',
+                                                  pos_weight=torch.FloatTensor([config['pos_weight']]))
         elif self.config['edit_loss'] == 'softmax':
             self.edit_loss = nn.CrossEntropyLoss(reduction='none')
 
@@ -135,7 +140,7 @@ class SingleEdit(nn.Module):
             raise ValueError(f"Tensors of type {type(tensors)} unsupported")
 
     def _compute_edit_logits(self, graph_tensors: Tuple[torch.Tensor],
-                             scopes: Tuple[List],  bg_inputs: torch.Tensor = None,
+                             scopes: Tuple[List], bg_inputs: torch.Tensor = None,
                              ha: torch.Tensor = None) -> Tuple[torch.Tensor]:
         """
         Computes the edit logits.
@@ -152,56 +157,85 @@ class SingleEdit(nn.Module):
             Hidden states of atoms in the molecule
         """
         atom_scope, bond_scope = scopes
+        enable_dropout = not (self.training or self.mcd_samples == 0)
+        mcd_cycle = max(1, self.mcd_samples)  # no mcd <=> 1 iteration of cycle
+        if enable_dropout:
+            self.enable_dropout()
 
-        c_mol, c_atom = self.encoder(graph_tensors, scopes)
-        if self.toggles.get('use_attn', False):
-            c_mol, c_atom_att = self.attn_layer(c_atom, scopes)
-            c_atom_starts = index_select_ND(c_atom_att, dim=0, index=graph_tensors[-1][:, 0])
-            c_atom_ends = index_select_ND(c_atom_att, dim=0, index=graph_tensors[-1][:, 1])
+        edit_logits_list = []
 
-        else:
-            c_atom_starts = index_select_ND(c_atom, dim=0, index=graph_tensors[-1][:, 0])
-            c_atom_ends = index_select_ND(c_atom, dim=0, index=graph_tensors[-1][:, 1])
+        for i in range(mcd_cycle):
 
-        sum_bonds = c_atom_starts + c_atom_ends
-        diff_bonds = torch.abs(c_atom_starts - c_atom_ends)
-        bond_score_inputs = torch.cat([sum_bonds, diff_bonds], dim=1)
-        atom_score_inputs = c_atom.clone()
+            c_mol, c_atom = self.encoder(graph_tensors, scopes)
+            if self.toggles.get('use_attn', False):
+                c_mol, c_atom_att = self.attn_layer(c_atom, scopes)
+                c_atom_starts = index_select_ND(c_atom_att, dim=0, index=graph_tensors[-1][:, 0])
+                c_atom_ends = index_select_ND(c_atom_att, dim=0, index=graph_tensors[-1][:, 1])
 
-        if self.toggles.get("use_prod", False):
-            atom_scope, bond_scope = scopes
-            mol_exp_atoms = torch.cat([c_mol[idx].expand(le, -1)
-                                    for idx, (st, le) in enumerate(atom_scope)], dim=0)
-            mol_exp_bonds = torch.cat([c_mol[idx].expand(le, -1)
-                                    for idx, (st, le) in enumerate(bond_scope)], dim=0)
-            mol_exp_atoms = torch.cat([c_mol.new_zeros(1, c_mol.shape[-1]), mol_exp_atoms], dim=0)
-            mol_exp_bonds = torch.cat([c_mol.new_zeros(1, c_mol.shape[-1]), mol_exp_bonds], dim=0)
-            assert len(mol_exp_atoms) == len(atom_score_inputs)
-            assert len(mol_exp_bonds) == len(bond_score_inputs)
+            else:
+                c_atom_starts = index_select_ND(c_atom, dim=0, index=graph_tensors[-1][:, 0])
+                c_atom_ends = index_select_ND(c_atom, dim=0, index=graph_tensors[-1][:, 1])
 
-            bond_score_inputs = torch.cat([bond_score_inputs, mol_exp_bonds], dim=-1)
-            atom_score_inputs = torch.cat([atom_score_inputs, mol_exp_atoms], dim=-1)
+            sum_bonds = c_atom_starts + c_atom_ends
+            diff_bonds = torch.abs(c_atom_starts - c_atom_ends)
+            bond_score_inputs = torch.cat([sum_bonds, diff_bonds], dim=1)
+            atom_score_inputs = c_atom.clone()
 
-        bond_logits = self.bond_score(bond_score_inputs)
-        unimol_logits = self.unimol_score(atom_score_inputs)
+            if self.toggles.get("use_prod", False):
+                atom_scope, bond_scope = scopes
+                mol_exp_atoms = torch.cat([c_mol[idx].expand(le, -1)
+                                           for idx, (st, le) in enumerate(atom_scope)], dim=0)
+                mol_exp_bonds = torch.cat([c_mol[idx].expand(le, -1)
+                                           for idx, (st, le) in enumerate(bond_scope)], dim=0)
+                mol_exp_atoms = torch.cat([c_mol.new_zeros(1, c_mol.shape[-1]), mol_exp_atoms], dim=0)
+                mol_exp_bonds = torch.cat([c_mol.new_zeros(1, c_mol.shape[-1]), mol_exp_bonds], dim=0)
+                assert len(mol_exp_atoms) == len(atom_score_inputs)
+                assert len(mol_exp_bonds) == len(bond_score_inputs)
 
-        if self.toggles.get("propagate_logits", False):
-            bg_tensors, bg_scope = bg_inputs
-            assert len(bond_logits) == len(bg_tensors[0])
-            bond_logits = self.bond_label_mpn(bond_logits, bg_tensors, mask=None)
-            edit_logits = [torch.cat([bond_logits[st_b: st_b+le_b].flatten(),
-                                     unimol_logits[st_a: st_a+le_a].flatten()], dim=-1)
-                           for ((st_a, le_a), (st_b, le_b)) in zip(*(atom_scope, bond_scope))]
-            return c_mol, edit_logits, None
+                bond_score_inputs = torch.cat([bond_score_inputs, mol_exp_bonds], dim=-1)
+                atom_score_inputs = torch.cat([atom_score_inputs, mol_exp_atoms], dim=-1)
 
-        edit_logits = [torch.cat([bond_logits[st_b: st_b+le_b].flatten(),
-                                 unimol_logits[st_a: st_a+le_a].flatten()], dim=-1)
-                       for ((st_a, le_a), (st_b, le_b)) in zip(*(atom_scope, bond_scope))]
+            bond_logits = self.bond_score(bond_score_inputs)
+            unimol_logits = self.unimol_score(atom_score_inputs)
 
-        return c_mol, edit_logits, None
+            if self.toggles.get("propagate_logits", False):
+                bg_tensors, bg_scope = bg_inputs
+                assert len(bond_logits) == len(bg_tensors[0])
+                bond_logits = self.bond_label_mpn(bond_logits, bg_tensors, mask=None)
+                edit_logits = [torch.cat([bond_logits[st_b: st_b + le_b].flatten(),
+                                          unimol_logits[st_a: st_a + le_a].flatten()], dim=-1)
+                               for ((st_a, le_a), (st_b, le_b)) in zip(*(atom_scope, bond_scope))]
+
+            else:
+                edit_logits = [torch.cat([bond_logits[st_b: st_b + le_b].flatten(),
+                                          unimol_logits[st_a: st_a + le_a].flatten()], dim=-1)
+                               for ((st_a, le_a), (st_b, le_b)) in zip(*(atom_scope, bond_scope))]
+
+            edit_logits_list.append(edit_logits)
+        # averaging
+        edit_logits = []
+        for i in range(len(edit_logits_list[0])):
+            iter_list = []
+            for j in range(mcd_cycle):
+                iter_list.append(edit_logits_list[j][i])
+            mean = torch.mean(torch.stack(iter_list), 0)
+            edit_logits.append(mean)
+
+        # entropy calculation
+        entropy = []
+        epsilon = sys.float_info.epsilon
+        for e in edit_logits:
+            e = torch.softmax(e, dim=-1).cpu().detach().numpy()
+            ent = -np.sum(e * np.log(e + epsilon), axis=-1)
+            entropy.append(ent)
+
+        if enable_dropout:
+            self.disable_dropout()
+
+        return c_mol, edit_logits, entropy
 
     def forward(self, graph_tensors: Tuple[torch.Tensor], scopes: Tuple[List],
-                bg_inputs = None) -> Tuple[torch.Tensor]:
+                bg_inputs=None) -> Tuple[torch.Tensor]:
         """Forward pass
 
         Parameters
@@ -218,9 +252,9 @@ class SingleEdit(nn.Module):
             bg_tensors, bg_scope = bg_inputs
             bg_tensors = self.to_device(bg_tensors)
             bg_inputs = (bg_tensors, bg_scope)
-        c_mol, edit_logits, _ = self._compute_edit_logits(graph_tensors, scopes,
-                                                       ha=None, bg_inputs=bg_inputs)
-        return c_mol, edit_logits
+        c_mol, edit_logits, entropy = self._compute_edit_logits(graph_tensors, scopes,
+                                                          ha=None, bg_inputs=bg_inputs)
+        return c_mol, edit_logits, entropy
 
     def train_step(self, graph_tensors: Tuple[torch.Tensor],
                    scopes: Tuple[List], bg_inputs: Tuple[Tuple[torch.Tensor], Tuple[List]],
@@ -240,14 +274,14 @@ class SingleEdit(nn.Module):
         """
         edit_labels = self.to_device(edit_labels)
 
-        prod_vecs, edit_logits = self(graph_tensors, scopes, bg_inputs)
+        prod_vecs, edit_logits, _ = self(graph_tensors, scopes, bg_inputs)
         if self.config['edit_loss'] == 'sigmoid':
             loss_batch = [self.edit_loss(edit_logits[i].unsqueeze(0), edit_labels[i].unsqueeze(0)).sum()
                           for i in range(len(edit_logits))]
 
         elif self.config['edit_loss'] == 'softmax':
             loss_batch = [self.edit_loss(edit_logits[i].unsqueeze(0),
-                                            torch.argmax(edit_labels[i]).unsqueeze(0).long()).sum()
+                                         torch.argmax(edit_labels[i]).unsqueeze(0).long()).sum()
                           for i in range(len(edit_logits))]
         else:
             raise ValueError()
@@ -276,14 +310,26 @@ class SingleEdit(nn.Module):
 
         for idx, prod_smi in enumerate(prod_smi_batch):
             if rxn_classes is None:
-                edits = self.predict(prod_smi)
+                edits, entropy = self.predict(prod_smi)
             else:
-                edits = self.predict(prod_smi, rxn_class=rxn_classes[idx])
+                edits, entropy = self.predict(prod_smi, rxn_class=rxn_classes[idx])
             if set(edits) == set(core_edits_batch[idx]):
                 accuracy += 1.0
 
         metrics = {'loss': None, 'accuracy': accuracy}
         return loss, metrics
+
+    def enable_dropout(self):
+        """ Function to enable the dropout layers during test-time """
+        for m in self.modules():
+            if m.__class__.__name__.startswith('Dropout'):
+                m.train()
+
+    def disable_dropout(self):
+        """ Function to disable the dropout layers during test-time """
+        for m in self.modules():
+            if m.__class__.__name__.startswith('Dropout'):
+                m.eval()
 
     def predict(self, prod_smi: str, rxn_class: int = None) -> List:
         """Make predictions for given product smiles string.
@@ -311,13 +357,13 @@ class SingleEdit(nn.Module):
 
             prod_graph = RxnElement(mol=Chem.Mol(mol), rxn_class=rxn_class)
             prod_tensors, prod_scopes = pack_graph_feats([prod_graph],
-                                                          directed=directed, return_graphs=False,
-                                                          use_rxn_class=use_rxn_class)
+                                                         directed=directed, return_graphs=False,
+                                                         use_rxn_class=use_rxn_class)
             bg_inputs = None
             if self.toggles.get("propagate_logits", False):
                 bg_inputs = tensorize_bond_graphs([prod_graph], directed=directed,
-                                                   use_rxn_class=use_rxn_class)
-            _, edit_logits = self(prod_tensors, prod_scopes, bg_inputs)
+                                                  use_rxn_class=use_rxn_class)
+            _, edit_logits, entropy = self(prod_tensors, prod_scopes, bg_inputs)
             idx = torch.argmax(edit_logits[0])
             val = edit_logits[0][idx]
 
@@ -366,12 +412,12 @@ class SingleEdit(nn.Module):
 
                 edit = f"{a1}:{0}:{1.0}:{0.0}"
 
-        return [edit]
+        return [edit], entropy
 
     def get_kthedit(self, mol, edit_logits, k=1):
         values, indices = edit_logits[0].topk(k=k, dim=0)
-        idx = indices[k-1]
-        val = values[k-1]
+        idx = indices[k - 1]
+        val = values[k - 1]
 
         if self.config['bs_outdim'] > 1:
             max_bond_idx = mol.GetNumBonds() * len(BOND_FLOATS)

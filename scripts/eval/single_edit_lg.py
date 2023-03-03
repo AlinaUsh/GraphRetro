@@ -100,6 +100,7 @@ def main():
 
     parser.add_argument(
         "--mcd_samples",
+        type=int,
         default=0,
         help="Number of samples for MC dropout. 0 -- without uncertainty quantification."
     )
@@ -123,10 +124,6 @@ def main():
                 tensor_file = os.path.join(args.data_dir, "train/h_labels/with_rxn/lg_inputs.pt")
             lg_config['tensor_file'] = tensor_file
 
-    # print(lg_config)
-    # print(args)
-    # print(args['mcd_samples'])
-    # config['config']['mcd_samples'] = args['mcd_samples']
     rm = EditLGSeparate(edits_config=edits_config, lg_config=lg_config, edit_net_name=edit_net_name,
                         lg_net_name=lg_net_name, device=DEVICE)
     rm.load_state_dict(edits_loaded['state'], lg_loaded['state'])

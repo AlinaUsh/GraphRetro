@@ -114,7 +114,7 @@ class EditLGSeparate:
         prod_smi: str,
             Product SMILES string
         """
-        edits = self.edit_net.predict(prod_smi, rxn_class=rxn_class)
+        edits, entropy = self.edit_net.predict(prod_smi, rxn_class=rxn_class)
         if not isinstance(edits, list):
             edits = [edits]
 
@@ -125,4 +125,4 @@ class EditLGSeparate:
             return edits, labels
 
         except:
-            return edits, []
+            return edits, [entropy]

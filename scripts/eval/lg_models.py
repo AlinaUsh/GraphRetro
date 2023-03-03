@@ -156,7 +156,7 @@ def main():
     for i in range(5):
         results_df[f'lg top-{i + 1} pred'] = leaving_groups_pred[i]
 
-    results_df.to_csv('eval_entropy.csv')
+    results_df.to_csv('eval_entropy_lg.csv')
 
 
 if __name__ == "__main__":

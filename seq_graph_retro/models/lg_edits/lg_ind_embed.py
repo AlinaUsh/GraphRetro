@@ -126,7 +126,6 @@ class LGIndEmbed(nn.Module):
             variance = np.var(probs_list, axis=0)
             epsilon = sys.float_info.epsilon
             entropy = -np.sum(mean * np.log(mean + epsilon), axis=-1)
-            # uncertainty = (mean, entropy)
         return scores_lg, entropy
 
     def _compute_lg_logits(self, graph_vecs_pad, prod_vecs, lg_labels=None):

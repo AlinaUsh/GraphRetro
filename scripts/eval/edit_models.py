@@ -7,6 +7,8 @@ import tqdm
 import wandb
 import yaml
 
+import random
+
 from seq_graph_retro.utils.parse import get_reaction_info
 from seq_graph_retro.models import SingleEdit, MultiEdit
 from seq_graph_retro.search import EditSearch
@@ -39,6 +41,18 @@ def main():
                         help="Checkpoint to load for the edits experiment.")
     parser.add_argument("--beam_width", type=int, default=5, help="Beam width")
 
+    parser.add_argument(
+        "--mcd_samples",
+        type=int,
+        default=0,
+        help="Number of samples for MC dropout. 0 -- without uncertainty quantification."
+    )
+
+    # fix random seed for using MC dropout
+    torch.manual_seed(0)
+    random.seed(0)
+    np.random.seed(0)
+
     args = parser.parse_args()
 
     test_df = pd.read_csv(args.test_file)
@@ -64,12 +78,15 @@ def main():
     model_class = MODELS.get(model_name)
     config = edits_loaded["saveables"]
 
+    config['config']['mcd_samples'] = args.mcd_samples
+
     em = model_class(**config, device=DEVICE)
     em.load_state_dict(edits_loaded['state'])
     em.to(DEVICE)
     em.eval()
 
     toggles = config['toggles']
+    print(toggles)
 
     if model_name == 'single_edit' or model_name == "SingleEdit":
         beam_model = EditSearch(model=em, beam_width=args.beam_width, max_edits=1)
@@ -78,6 +95,11 @@ def main():
 
     pbar = tqdm.tqdm(list(range(len(test_df))))
     n_matched = np.zeros(args.beam_width)
+
+    results_df = pd.read_csv(args.test_file)
+    # entropies and predicted edits for top-5
+    entropies = [[], [], [], [], []]
+    edits_pred = [[], [], [], [], []]
 
     for idx in pbar:
         rxn_smi = test_df.loc[idx, 'reactants>reagents>production']
@@ -107,14 +129,27 @@ def main():
                     n_matched[beam_idx] += 1
                     beam_matched = True
 
+            for i, node in enumerate(top_k_nodes):
+                entropies[i].append('\n'.join([str(e) for e in node.entropies]))
+                edits_pred[i].append('\n'.join(node.edit))
+
             msg = 'average score'
             for beam_idx in [1, 2, 3, 5]:
                 match_perc = np.sum(n_matched[:beam_idx]) / (idx + 1)
                 msg += ', t%d: %.4f' % (beam_idx, match_perc)
             pbar.set_description(msg)
+
         except Exception as e:
             print(e)
             continue
+
+    for i in range(5):
+        results_df[f'entropy top-{i + 1}'] = entropies[i]
+    for i in range(5):
+        results_df[f'edits top-{i + 1} pred'] = edits_pred[i]
+
+    results_df.to_csv('eval_entropy_edits.csv')
+
 
 if __name__ == "__main__":
     main()

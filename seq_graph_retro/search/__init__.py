@@ -33,9 +33,10 @@ class BeamNode:
         self.frag_vecs = None
         self.prev_embed = None
 
-    def add_edit(self, edit, edit_prob):
+    def add_edit(self, edit, edit_prob, entropy=None):
         self.edit = edit
         self.prob += edit_prob
+        self.entropies = entropy
 
     def add_lg(self, lg_group, lg_prob, entropy=None):
         if self.node_complete:
@@ -142,7 +143,7 @@ class BeamSearch:
             bg_tensors, bg_scope = bg_inputs
             bg_tensors = self.model.to_device(bg_tensors)
             bg_inputs = (bg_tensors, bg_scope)
-            prod_vecs, edit_logits, _ = self.model._compute_edit_logits(prod_tensors, prod_scopes,
+            prod_vecs, edit_logits, entropy = self.model._compute_edit_logits(prod_tensors, prod_scopes,
                                                                         ha=None, bg_inputs=bg_inputs)
             edit_logits = edit_logits[0]
 
@@ -156,7 +157,7 @@ class BeamSearch:
                                                  idx=topk_idx, val=val)
                 if not isinstance(edit, list):
                     edit = [edit]
-                node_list[beam_idx].add_edit(edit=edit, edit_prob=val.item())
+                node_list[beam_idx].add_edit(edit=edit, edit_prob=val.item(), entropy=entropy)
                 if hasattr(self.model, 'encoder'):
                     node_list[beam_idx].prod_vecs = prod_vecs.clone()
 
@@ -438,7 +439,7 @@ class EditSearch(BeamSearch):
             bg_tensors, bg_scope = bg_inputs
             bg_tensors = self.model.to_device(bg_tensors)
             bg_inputs = (bg_tensors, bg_scope)
-            prod_vecs, edit_logits, _ = self.model._compute_edit_logits(prod_tensors, prod_scopes,
+            prod_vecs, edit_logits, entropy = self.model._compute_edit_logits(prod_tensors, prod_scopes,
                                                                         ha=None, bg_inputs=bg_inputs)
             edit_logits = edit_logits[0]
 
@@ -452,7 +453,7 @@ class EditSearch(BeamSearch):
                                                  idx=topk_idx, val=val)
                 if not isinstance(edit, list):
                     edit = [edit]
-                node_list[beam_idx].add_edit(edit=edit, edit_prob=val.item())
+                node_list[beam_idx].add_edit(edit=edit, edit_prob=val.item(), entropy=entropy)
                 if hasattr(self.model, 'encoder'):
                     node_list[beam_idx].prod_vecs = prod_vecs.clone()
 
