@@ -98,7 +98,7 @@ def main():
 
     results_df = pd.read_csv(args.test_file)
     # entropies and predicted edits for top-5
-    entropies = [[], [], [], [], []]
+    entropies = []
     edits_pred = [[], [], [], [], []]
 
     for idx in pbar:
@@ -129,8 +129,8 @@ def main():
                     n_matched[beam_idx] += 1
                     beam_matched = True
 
+            entropies.append('\n'.join([str(e) for e in top_k_nodes[0].entropies]))
             for i, node in enumerate(top_k_nodes):
-                entropies[i].append('\n'.join([str(e) for e in node.entropies]))
                 edits_pred[i].append('\n'.join(node.edit))
 
             msg = 'average score'
@@ -143,8 +143,7 @@ def main():
             print(e)
             continue
 
-    for i in range(5):
-        results_df[f'entropy top-{i + 1}'] = entropies[i]
+    results_df[f'entropy'] = entropies
     for i in range(5):
         results_df[f'edits top-{i + 1} pred'] = edits_pred[i]
 
