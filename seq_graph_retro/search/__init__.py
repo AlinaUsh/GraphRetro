@@ -70,7 +70,8 @@ def copy_node(node):
     if node.prev_embed is not None:
         new_node.prev_embed = node.prev_embed.clone()
 
-    new_node.entropies = node.entropies.copy()
+    if node.entropies is not None:
+        new_node.entropies = node.entropies.copy()
 
     return new_node
 
