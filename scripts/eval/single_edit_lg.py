@@ -7,6 +7,8 @@ from tqdm import tqdm
 from rdkit import RDLogger, Chem
 import yaml
 
+import random
+
 from seq_graph_retro.utils.parse import get_reaction_info, extract_leaving_groups
 from seq_graph_retro.utils.chem import apply_edits_to_mol
 from seq_graph_retro.utils.edit_mol import canonicalize, generate_reac_set
@@ -99,11 +101,22 @@ def main():
                         help="Whether to print reaction class accuracy.")
 
     parser.add_argument(
-        "--mcd_samples",
+        "--mcd_samples_edits",
         type=int,
         default=0,
-        help="Number of samples for MC dropout. 0 -- without uncertainty quantification."
+        help="Number of samples for MC dropout for edits model. 0 -- without uncertainty quantification."
     )
+    parser.add_argument(
+        "--mcd_samples_lg",
+        type=int,
+        default=0,
+        help="Number of samples for MC dropout for lg model. 0 -- without uncertainty quantification."
+    )
+
+    # fix random seed for using MC dropout
+    torch.manual_seed(0)
+    random.seed(0)
+    np.random.seed(0)
 
     args = parser.parse_args()
 
@@ -115,6 +128,9 @@ def main():
     edits_config = edits_loaded["saveables"]
     lg_config = lg_loaded['saveables']
     lg_toggles = lg_config['toggles']
+
+    edits_config['config']['mcd_samples'] = args.mcd_samples_edits
+    lg_config['config']['mcd_samples'] = args.mcd_samples_lg
 
     if 'tensor_file' in lg_config:
         if not os.path.isfile(lg_config['tensor_file']):
