@@ -5,7 +5,9 @@ from rdkit import Chem
 from typing import List, Dict, Tuple, Union
 
 import sys
+import pickle
 import numpy as np
+import pandas as pd
 
 from seq_graph_retro.layers import (AtomAttention, GraphFeatEncoder, WLNEncoder,
                                     LogitEncoder, GTransEncoder)
@@ -224,9 +226,17 @@ class SingleEdit(nn.Module):
         # entropy calculation
         entropy = []
         epsilon = sys.float_info.epsilon
+        logits = []
         for e in edit_logits:
+            # with open("../entropy_experiments/easiest_logits.pkl", "rb") as f:
+            #     logits = pickle.load(f)
+            # logits.append(e.tolist())
+            # with open("../entropy_experiments/easiest_logits.pkl", "wb") as f:
+            #     pickle.dump(logits, f)
             e = torch.softmax(e, dim=-1).cpu().detach().numpy()
             ent = -np.sum(e * np.log(e + epsilon), axis=-1)
+            # entropy normalization
+            ent /= np.log(len(e))
             entropy.append(ent)
 
         if enable_dropout:
